@@ -16,6 +16,7 @@ pub enum BufferError {
 pub struct Buffer {
     pub file: Option<String>,
     pub lines: Vec<String>,
+    pub modified: bool,
 }
 
 impl Buffer {
@@ -32,7 +33,7 @@ impl Buffer {
             }
             None => vec![String::new()],
         };
-        Ok(Self { file, lines })
+        Ok(Self { file, lines, modified: false })
     }
 
     pub fn len(&self) -> usize {
@@ -50,20 +51,27 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, line: usize, col: usize, c: char) -> Result<(), BufferError> {
-        let line_content = self.get_line_mut(line)?;
-        if col > line_content.len() {
-            return Err(BufferError::InvalidColumnIndex(col, line));
+        {
+            let line_content = self.get_line_mut(line)?;
+            if col > line_content.len() {
+                return Err(BufferError::InvalidColumnIndex(col, line));
+            }
+            line_content.insert(col, c);
         }
-        line_content.insert(col, c);
+        self.modified = true;
         Ok(())
     }
 
     pub fn remove_char(&mut self, line: usize, col: usize) -> Result<char, BufferError> {
-        let line_content = self.get_line_mut(line)?;
-        if col >= line_content.len() {
-            return Err(BufferError::InvalidColumnIndex(col, line));
-        }
-        Ok(line_content.remove(col))
+        let removed = {
+            let line_content = self.get_line_mut(line)?;
+            if col >= line_content.len() {
+                return Err(BufferError::InvalidColumnIndex(col, line));
+            }
+            line_content.remove(col)
+        };
+        self.modified = true;
+        Ok(removed)
     }
 
     pub fn line_length(&self, index: usize) -> Result<usize, BufferError> {
@@ -83,11 +91,32 @@ impl Buffer {
         }
 
         let current_line = self.lines.remove(line_index);
-        let previous_line = self.get_line_mut(line_index - 1)?;
-        let previous_length = previous_line.len();
-        previous_line.push_str(&current_line);
-        
+        let previous_length = {
+            let previous_line = self.get_line_mut(line_index - 1)?;
+            let len = previous_line.len();
+            previous_line.push_str(&current_line);
+            len
+        };
+        self.modified = true;
         Ok(previous_length)
+    }
+
+    pub fn delete_line(&mut self, index: usize) -> Result<(), BufferError> {
+        if self.lines.is_empty() {
+            return Err(BufferError::InvalidLineIndex(index));
+        }
+        if self.lines.len() == 1 {
+            // keep a single empty line
+            self.lines[0].clear();
+            self.modified = true;
+            return Ok(());
+        }
+        if index >= self.lines.len() {
+            return Err(BufferError::InvalidLineIndex(index));
+        }
+        self.lines.remove(index);
+        self.modified = true;
+        Ok(())
     }
 
     pub fn save(&self) -> Result<(), BufferError> {
@@ -112,6 +141,7 @@ impl Buffer {
             std::fs::create_dir_all(parent)?;
             std::fs::write(&file_path, self.lines.join("\n"))?;
             self.file = Some(file_path);
+            self.modified = false;
             Ok(())
         }
     }

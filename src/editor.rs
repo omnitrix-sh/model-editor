@@ -16,6 +16,7 @@ pub enum Actions {
     NewLine,
     Save,
     SaveAs(String),
+    DeleteLine,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub fn handle_normal_event(ev: Event) -> Option<Actions> {
                     // For now, just save to a hardcoded path. We'll add proper UI for this later.
                     Some(Actions::SaveAs("new_file.txt".to_string()))
                 },
+                (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(Actions::DeleteLine),
                 _ => None,
             }
         },
@@ -65,16 +67,20 @@ pub struct Editor {
     pub buffer: Buffer,
     pub cx: u16,
     pub cy: u16,
+    pub row_offset: usize,
     pub mode: Mode,
+    pub status_message: Option<String>,
 }
 
 impl Editor {
     pub fn new() -> Self {
         Self {
-            buffer: Buffer { file: None, lines: vec![String::new()] },
+            buffer: Buffer { file: None, lines: vec![String::new()], modified: false },
             cx: 0,
             cy: 0,
+            row_offset: 0,
             mode: Mode::Normal,
+            status_message: None,
         }
     }
 
@@ -83,7 +89,9 @@ impl Editor {
             buffer,
             cx: 0,
             cy: 0,
+            row_offset: 0,
             mode: Mode::Normal,
+            status_message: None,
         }
     }
     pub fn handle_event(&self, ev: Event) -> Option<Actions> {
@@ -152,32 +160,67 @@ impl Editor {
                 }
             }
             Actions::Save => {
-                if let Err(e) = self.buffer.save() {
-                    // TODO: Show error in status line
-                    eprintln!("Error saving file: {}", e);
+                match self.buffer.save() {
+                    Ok(()) => {
+                        self.status_message = Some("Saved.".to_string());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Error saving file: {}", e));
+                    }
                 }
             }
             Actions::SaveAs(path) => {
-                if let Err(e) = self.buffer.save_as(path) {
-                    // TODO: Show error in status line
-                    eprintln!("Error saving file: {}", e);
+                match self.buffer.save_as(path) {
+                    Ok(()) => self.status_message = Some("Saved (as).".to_string()),
+                    Err(e) => self.status_message = Some(format!("Error saving file: {}", e)),
+                }
+            }
+            Actions::DeleteLine => {
+                match self.buffer.delete_line(self.cy as usize) {
+                    Ok(()) => {
+                        // adjust cursor if we were on the last line
+                        if (self.cy as usize) >= self.buffer.len() {
+                            self.cy = (self.buffer.len().saturating_sub(1)) as u16;
+                        }
+                        // ensure cx is not past end of line
+                        if let Ok(len) = self.buffer.line_length(self.cy as usize) {
+                            if self.cx as usize > len {
+                                self.cx = len as u16;
+                            }
+                        }
+                        self.status_message = Some("Line deleted".to_string());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Error deleting line: {}", e));
+                    }
                 }
             }
         }
     }
-    pub fn render(&self, stdout: &mut impl Write) -> Result<()> {
+    pub fn render(&mut self, stdout: &mut impl Write) -> Result<()> {
         let (w, h) = terminal::size()?;
         stdout.queue(terminal::Clear(terminal::ClearType::All))?;
-        for (i, line) in self.buffer.lines.iter().enumerate() {
-            if i as u16 >= h.saturating_sub(1) { break; }
-            stdout.queue(MoveTo(0, i as u16))?;
+        let visible_height = h.saturating_sub(1) as usize; // leave last line for status
+
+        // adjust row_offset so cy is visible
+        if (self.cy as usize) < self.row_offset {
+            self.row_offset = self.cy as usize;
+        } else if (self.cy as usize) >= self.row_offset + visible_height {
+            self.row_offset = (self.cy as usize).saturating_sub(visible_height).saturating_add(1);
+        }
+
+        for (i, line) in self.buffer.lines.iter().enumerate().skip(self.row_offset) {
+            let y = (i - self.row_offset) as u16;
+            if y as u16 >= h.saturating_sub(1) { break; }
+            stdout.queue(MoveTo(0, y))?;
             stdout.queue(Print(line))?;
         }
         let mode_name = match self.mode {
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",
         };
-        let filename = self.buffer.display_name();
+    let filename = self.buffer.display_name();
+    let modified_marker = if self.buffer.modified { "*" } else { "" };
         let line = (self.cy + 1).to_string();
         let col = (self.cx + 1).to_string();
         let percent = if self.buffer.len() <= 1 {
@@ -187,8 +230,13 @@ impl Editor {
             let pct = (self.cy as f64 / last) * 100.0;
             pct.round() as u16
         };
-        let left = format!("{} > {} >", mode_name, filename);
-        let right = format!("Ln {} Col {}  {}%", line, col, percent);
+        let left = format!("{} > {}{} >", mode_name, filename, modified_marker);
+        // show status_message on right if present, otherwise show Ln/Col/percent
+        let right = if let Some(msg) = &self.status_message {
+            msg.clone()
+        } else {
+            format!("Ln {} Col {}  {}%", line, col, percent)
+        };
         let status_y = h.saturating_sub(1);
         let mut status_line = String::new();
         let left_len = left.len();
